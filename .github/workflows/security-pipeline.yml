@@ -21,11 +21,16 @@ jobs:
         uses: semgrep/semgrep-action@v1
         with:
           config: p/python
-
-      - name: Dependency Scan - OWASP
-        run: |
-          echo "Dependency scan stage"
-          echo "No dependencies in this demo application"
+       - name: Dependency Scan - OWASP
+         uses: dependency-check/Dependency-Check_Action@main
+         with:
+          project: "Secure DevOps Demo"
+          path: "."
+          format: "HTML"
+          out: "dependency-check-report"
+          args: >
+            --scan .
+            --enableRetired
 
       - name: Security Gate
         run: |
