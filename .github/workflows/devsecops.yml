@@ -48,14 +48,18 @@ jobs:
       # The install step is kept as a dependency audit rather than a setup step.
       - name: Audit dependencies
         run: |
+          set -euo pipefail
           python -m pip install --upgrade pip
-          pip install pip-audit
-          # No third-party runtime dependencies are declared. If
-          # requirements.txt ever gains one, audit it here.
-          if grep -qvE '^\s*(#|$)' requirements.txt; then
+          # Pinned: an unpinned audit tool is itself an unpinned supply-chain
+          # dependency in the job that is supposed to be checking for those.
+          pip install "pip-audit==2.10.1"
+
+          # No third-party runtime dependencies are declared, so there is
+          # nothing to audit until requirements.txt gains a real entry.
+          if grep -qE '^[[:space:]]*[^#[:space:]]' requirements.txt; then
             pip-audit -r requirements.txt
           else
-            echo "No runtime dependencies declared — nothing to audit."
+            echo "No runtime dependencies declared - nothing to audit."
           fi
 
       # ── Unit validation ────────────────────────────────────────────────────
@@ -71,10 +75,30 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      # Semgrep is installed from a pinned PyPI release rather than via
+      # semgrep/semgrep-action, which is archived (last pushed April 2024) and
+      # requires a SEMGREP_APP_TOKEN. An archived action pinned in a security
+      # pipeline is a liability: it receives no fixes and cannot be trusted to
+      # keep behaving. The p/python ruleset needs no token.
       - name: SAST — Semgrep
-        uses: semgrep/semgrep-action@713efdd345f3035192eaa63f56867b88e63e4e5d # v1
-        with:
-          config: p/python
+        run: |
+          set -euo pipefail
+          pip install "semgrep==1.180.0"
+          mkdir -p scanner-output
+          # Semgrep exits non-zero when it finds issues, which is expected here:
+          # the findings are the point, and gate.py decides whether they block.
+          semgrep scan \
+            --config p/python \
+            --json \
+            --output scanner-output/semgrep.json \
+            --metrics=off \
+            --error \
+            . || SEMGREP_RC=$?
+          if [ ! -s scanner-output/semgrep.json ]; then
+            echo "::error::Semgrep produced no report; refusing to continue."
+            exit 1
+          fi
+          echo "Semgrep completed (exit ${SEMGREP_RC:-0}) with a report present."
 
       - name: SCA — Trivy
         uses: aquasecurity/trivy-action@915b19bbe73b92a6cf82a1bc12b087c9a19a5fe2 # v0.28.0
@@ -86,37 +110,49 @@ jobs:
           output: scanner-output/trivy.json
 
       - name: Normalise scanner output
-        run: python tools/merge_scanners.py
+        run: |
+          set -euo pipefail
+          # --allow-empty is correct here. A missing or unparseable report is
+          # already a hard error inside merge_scanners.py, so "the file exists
+          # and parsed" is what proves the scanner ran. Zero findings then means
+          # a clean repository, which is a legitimate pass, not a failure.
+          python tools/merge_scanners.py --allow-empty
 
       # ── VerifierGate stages ────────────────────────────────────────────────
       - name: Build artifact
         run: |
+          set -euo pipefail
+          mkdir -p scanner-output
           tar --create --file app.tar \
               --exclude='./runs' \
               --exclude='./.git' \
+              --exclude='./app.tar' \
               .
           echo "app.tar created: $(stat -c%s app.tar) bytes"
 
       - name: Generate provenance attestation
         run: |
+          set -euo pipefail
           python tools/make_provenance.py \
             --artifact app.tar \
             --out provenance.json \
             --source "$(git rev-parse HEAD)" \
             --builder "${GITHUB_ACTOR:-local}" \
-            --print-source-digest | tee /dev/stderr | tail -n1 > expected_source_digest.txt
+            --print-source-digest | tee provenance.log | tail -n1 > expected_source_digest.txt
           echo "Expected source digest: $(cat expected_source_digest.txt)"
 
       # Each gate stage is a separate step so a failure names the stage that
       # broke in the Actions UI, instead of one opaque "security gate failed".
       - name: gate.py score
         run: |
+          set -euo pipefail
           python gate.py score \
             --findings scanner-output/merged_findings.json \
             --out scored_findings.json
 
       - name: gate.py check
         run: |
+          set -euo pipefail
           python gate.py check \
             --findings scored_findings.json \
             --policy policy.json \
@@ -124,6 +160,7 @@ jobs:
 
       - name: gate.py verify
         run: |
+          set -euo pipefail
           python gate.py verify \
             --artifact app.tar \
             --provenance provenance.json \
