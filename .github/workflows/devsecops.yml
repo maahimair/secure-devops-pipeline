@@ -1,0 +1,164 @@
+# VerifierGate — centralised deployment security gate.
+#
+# Design notes:
+#   * `permissions` is scoped to read-only contents. Nothing in this pipeline
+#     needs write access, so no write scope is granted at all.
+#   * Third-party actions are pinned to a full commit SHA, not a tag. A mutable
+#     tag such as `@v4` can be repointed at new code by anyone who compromises
+#     the upstream repository; a SHA cannot.
+#   * `persist-credentials: false` stops the checkout token from being written
+#     into .git/config where a later step could exfiltrate it.
+#   * gate.py exits 2 to block a deployment, which fails this job by design.
+
+name: VerifierGate Security Pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Cancel superseded runs on the same ref so a stale push cannot report success.
+concurrency:
+  group: verifergate-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  security-gate:
+    name: Correlate, policy check, verify provenance
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      # ── Checkout ───────────────────────────────────────────────────────────
+      - name: Checkout code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38 # v5.4.0
+        with:
+          python-version: '3.12'
+
+      # VerifierGate is standard-library only, so there is nothing to install.
+      # The install step is kept as a dependency audit rather than a setup step.
+      - name: Audit dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pip-audit
+          # No third-party runtime dependencies are declared. If
+          # requirements.txt ever gains one, audit it here.
+          if grep -qvE '^\s*(#|$)' requirements.txt; then
+            pip-audit -r requirements.txt
+          else
+            echo "No runtime dependencies declared — nothing to audit."
+          fi
+
+      # ── Unit validation ────────────────────────────────────────────────────
+      - name: Validate security controls
+        run: python tests/run_tests.py -v
+
+      # ── Scanner stage ──────────────────────────────────────────────────────
+      # Each scanner writes normalised JSON into scanner-output/. A scanner that
+      # fails must fail the job rather than silently producing an empty file,
+      # which would look like "no findings" and let a deployment through.
+      - name: Secret scan — Gitleaks
+        uses: gitleaks/gitleaks-action@e6dab246340401bf53eec993b8f05aebe80ac636 # v2.3.4
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: SAST — Semgrep
+        uses: semgrep/semgrep-action@713efdd345f3035192eaa63f56867b88e63e4e5d # v1
+        with:
+          config: p/python
+
+      - name: SCA — Trivy
+        uses: aquasecurity/trivy-action@915b19bbe73b92a6cf82a1bc12b087c9a19a5fe2 # v0.28.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          severity: CRITICAL,HIGH
+          format: json
+          output: scanner-output/trivy.json
+
+      - name: Normalise scanner output
+        run: python tools/merge_scanners.py
+
+      # ── VerifierGate stages ────────────────────────────────────────────────
+      - name: Build artifact
+        run: |
+          tar --create --file app.tar \
+              --exclude='./runs' \
+              --exclude='./.git' \
+              .
+          echo "app.tar created: $(stat -c%s app.tar) bytes"
+
+      - name: Generate provenance attestation
+        run: |
+          python tools/make_provenance.py \
+            --artifact app.tar \
+            --out provenance.json \
+            --source "$(git rev-parse HEAD)" \
+            --builder "${GITHUB_ACTOR:-local}" \
+            --print-source-digest | tee /dev/stderr | tail -n1 > expected_source_digest.txt
+          echo "Expected source digest: $(cat expected_source_digest.txt)"
+
+      # Each gate stage is a separate step so a failure names the stage that
+      # broke in the Actions UI, instead of one opaque "security gate failed".
+      - name: gate.py score
+        run: |
+          python gate.py score \
+            --findings scanner-output/merged_findings.json \
+            --out scored_findings.json
+
+      - name: gate.py check
+        run: |
+          python gate.py check \
+            --findings scored_findings.json \
+            --policy policy.json \
+            --ledger ledger.jsonl
+
+      - name: gate.py verify
+        run: |
+          python gate.py verify \
+            --artifact app.tar \
+            --provenance provenance.json \
+            --source-digest "$(cat expected_source_digest.txt)" \
+            --freshness 3600 \
+            --ledger ledger.jsonl
+
+      - name: Verify audit ledger integrity
+        run: python gate.py ledger ledger.jsonl --describe
+
+      # ── Simulation ─────────────────────────────────────────────────────────
+      - name: Run simulated scenarios
+        run: python pipeline_sim.py
+
+      # ── Evidence ───────────────────────────────────────────────────────────
+      - name: Upload audit ledger
+        if: always()
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: verifergate-audit-ledger
+          path: ledger.jsonl
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Upload gate reports
+        if: always()
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: verifergate-reports
+          path: |
+            scored_findings.json
+            scanner-output/
+            runs/
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Fail if the ledger was tampered with
+        run: python gate.py ledger ledger.jsonl
