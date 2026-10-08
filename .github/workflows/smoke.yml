@@ -1,0 +1,17 @@
+# Temporary diagnostic: does ANY job start on this repository?
+name: CI Smoke Test
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Say hello
+        run: echo "runner is alive"
