@@ -139,6 +139,7 @@ while a genuine security block should stop the release and go to review.
 | `tools/merge_scanners.py` | Normalises Semgrep/Trivy/Gitleaks output | `merged_findings.json` |
 | `tools/make_provenance.py` | Generates a provenance attestation | `provenance.json` |
 | `tests/test_gate.py` | Validates the core security controls | 37 tests |
+| `tests/test_merge_scanners.py` | Pins real scanner output shapes | 19 tests |
 | `tests/run_tests.py` | Runs the suite with no dependencies | PASS/FAIL + exit code |
 
 Everything is **Python 3.9+ standard library only** — no third-party runtime
@@ -254,7 +255,7 @@ python tests/run_tests.py -v     # no dependencies
 python -m pytest tests -q        # if pytest is available
 ```
 
-37 tests. The four core controls map to documented controls:
+56 tests. The four core controls map to documented controls:
 
 | Test | Validates | Expected |
 | --- | --- | --- |
@@ -266,6 +267,12 @@ python -m pytest tests -q        # if pytest is available
 Plus risk-scoring reproduction, policy edge cases, provenance freshness and
 source-binding, ledger insertion/deletion detection, and CLI exit-code
 contracts.
+
+`tests/test_merge_scanners.py` pins the real output shapes of all three
+scanners. Each of these was a live CI failure before it had a test, and they
+share one root cause: **a scanner that finds nothing does not necessarily
+produce an empty list.** Trivy omits its `Results` key entirely, so treating
+that as an unrecognised structure turns a clean repository into a red build.
 
 ---
 
@@ -370,6 +377,7 @@ secure-devops-pipeline/
 │   └── make_provenance.py     # Attestation generator
 ├── tests/
 │   ├── test_gate.py           # 37 tests
+│   ├── test_merge_scanners.py # 19 tests
 │   └── run_tests.py           # Dependency-free runner
 └── .github/workflows/
     └── devsecops.yml          # CI security pipeline

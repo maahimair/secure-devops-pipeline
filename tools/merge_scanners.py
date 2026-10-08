@@ -52,52 +52,117 @@ def load_report(path: str) -> List[Dict[str, Any]]:
             raise MergeError(f"{name}: expected a JSON list of gitleaks findings")
         return _gitleaks_findings(payload)
 
+    if "trivy" in name:
+        if not isinstance(payload, dict):
+            raise MergeError(f"{name}: expected a JSON object")
+        return _trivy_findings(payload)
+
+    if "semgrep" in name:
+        if not isinstance(payload, dict):
+            raise MergeError(f"{name}: expected a JSON object")
+        return _semgrep_findings(payload)
+
+    # Unrecognised filename: fall back to structural detection.
+    return _sniff_report(name, payload)
+
+
+def _sniff_report(name: str, payload: Any) -> List[Dict[str, Any]]:
+    """Best-effort parse for a report whose filename is not recognised."""
     if isinstance(payload, list):
         return [item for item in payload if isinstance(item, dict)]
 
     if isinstance(payload, dict):
-        # Trivy wraps results in Results[].Target.
         if "Results" in payload:
-            findings: List[Dict[str, Any]] = []
-            for result in payload.get("Results") or []:
-                target = result.get("Target", "unknown")
-                for vulnerability in result.get("Vulnerabilities") or []:
-                    findings.append({
-                        "id": vulnerability.get("VulnerabilityID")
-                               or vulnerability.get("PkgName"),
-                        "kind": "sca",
-                        "title": vulnerability.get("Title")
-                                 or vulnerability.get("Description", ""),
-                        "severity": vulnerability.get("Severity", "UNKNOWN"),
-                        "location": target,
-                        "cvss": _trivy_cvss(vulnerability),
-                        "epss": 0.0,
-                        "kev": False,
-                        "reachable": False,
-                    })
-
-            # Trivy can also be run with its own secret scanner, which
-                # reports under a different key in the same Result object.
-                for secret in result.get("Secrets") or []:
-                    findings.append({
-                        "id": f"trivy:{secret.get('RuleID', 'secret')}",
-                        "kind": "secret",
-                        "title": secret.get("Title", "Secret detected by Trivy"),
-                        "severity": secret.get("Severity", "CRITICAL"),
-                        "location": target,
-                        "cvss": 0.0,
-                        "epss": 0.0,
-                        "kev": False,
-                        "reachable": True,
-                    })
-
-            return findings
-
+            return _trivy_findings(payload)
         for key in ("results", "findings"):
             if key in payload:
                 return [item for item in payload[key] if isinstance(item, dict)]
 
     raise MergeError(f"{name}: unrecognised report structure")
+
+
+def _trivy_findings(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """
+    Flatten Trivy output.
+
+    Trivy OMITS the `Results` key entirely when it finds nothing, rather than
+    emitting an empty list. Treating that as an unrecognised structure would
+    fail the whole pipeline on a clean repository, so an absent Results key
+    means zero findings.
+    """
+    findings: List[Dict[str, Any]] = []
+
+    for result in payload.get("Results") or []:
+        target = result.get("Target", "unknown")
+
+        for vulnerability in result.get("Vulnerabilities") or []:
+            findings.append({
+                "id": vulnerability.get("VulnerabilityID")
+                       or vulnerability.get("PkgName"),
+                "kind": "sca",
+                "title": vulnerability.get("Title")
+                         or vulnerability.get("Description", ""),
+                "severity": vulnerability.get("Severity", "UNKNOWN"),
+                "location": target,
+                "cvss": _trivy_cvss(vulnerability),
+                "epss": 0.0,
+                "kev": False,
+                "reachable": False,
+            })
+
+        # Trivy can also run its own secret scanner, which reports under a
+        # different key inside the same Result object.
+        for secret in result.get("Secrets") or []:
+            findings.append({
+                "id": f"trivy:{secret.get('RuleID', 'secret')}",
+                "kind": "secret",
+                "title": secret.get("Title", "Secret detected by Trivy"),
+                "severity": secret.get("Severity", "CRITICAL"),
+                "location": target,
+                "cvss": 0.0,
+                "epss": 0.0,
+                "kev": False,
+                "reachable": True,
+            })
+
+    return findings
+
+
+def _semgrep_findings(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """
+    Flatten Semgrep output.
+
+    Semgrep puts the human message and severity under `extra`, and reports the
+    file under `path`. Both are lifted into the common shape so the policy
+    engine sees a real severity and a usable location.
+    """
+    findings: List[Dict[str, Any]] = []
+
+    for entry in payload.get("results") or []:
+        if not isinstance(entry, dict):
+            continue
+
+        extra = entry.get("extra") or {}
+        path = str(entry.get("path") or "unknown")
+        start = (entry.get("start") or {}).get("line")
+        location = f"{path}:{start}" if start else path
+
+        findings.append({
+            "id": str(entry.get("check_id") or "semgrep:unknown-rule"),
+            "kind": "sast",
+            "title": str(extra.get("message") or entry.get("check_id") or ""),
+            "severity": str(extra.get("severity") or "UNKNOWN"),
+            "location": location,
+            # Semgrep does not publish CVSS or EPSS. Default to non-reachable
+            # and unexploited so SAST findings must clear the threshold on
+            # CVSS alone rather than inheriting a fabricated exploitability.
+            "cvss": 0.0,
+            "epss": 0.0,
+            "kev": False,
+            "reachable": False,
+        })
+
+    return findings
 
 
 def _trivy_cvss(vulnerability: Dict[str, Any]) -> float:
