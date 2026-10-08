@@ -44,6 +44,14 @@ def load_report(path: str) -> List[Dict[str, Any]]:
     with open(path, "r", encoding="utf-8-sig") as handle:
         payload = json.load(handle)
 
+    name = os.path.basename(path)
+
+    if "gitleaks" in name:
+        # Gitleaks writes a bare list of leak objects.
+        if not isinstance(payload, list):
+            raise MergeError(f"{name}: expected a JSON list of gitleaks findings")
+        return _gitleaks_findings(payload)
+
     if isinstance(payload, list):
         return [item for item in payload if isinstance(item, dict)]
 
@@ -67,13 +75,29 @@ def load_report(path: str) -> List[Dict[str, Any]]:
                         "kev": False,
                         "reachable": False,
                     })
+
+            # Trivy can also be run with its own secret scanner, which
+                # reports under a different key in the same Result object.
+                for secret in result.get("Secrets") or []:
+                    findings.append({
+                        "id": f"trivy:{secret.get('RuleID', 'secret')}",
+                        "kind": "secret",
+                        "title": secret.get("Title", "Secret detected by Trivy"),
+                        "severity": secret.get("Severity", "CRITICAL"),
+                        "location": target,
+                        "cvss": 0.0,
+                        "epss": 0.0,
+                        "kev": False,
+                        "reachable": True,
+                    })
+
             return findings
 
         for key in ("results", "findings"):
             if key in payload:
                 return [item for item in payload[key] if isinstance(item, dict)]
 
-    raise MergeError(f"{os.path.basename(path)}: unrecognised report structure")
+    raise MergeError(f"{name}: unrecognised report structure")
 
 
 def _trivy_cvss(vulnerability: Dict[str, Any]) -> float:
@@ -84,6 +108,46 @@ def _trivy_cvss(vulnerability: Dict[str, Any]) -> float:
         if isinstance(score, (int, float)):
             return float(score)
     return 0.0
+
+
+def _gitleaks_findings(report: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """
+    Map Gitleaks output onto the common representation.
+
+    Gitleaks emits a different schema from Semgrep and Trivy: CamelCase keys,
+    a `Secret` field rather than a vulnerability id, and no CVSS or EPSS score.
+    Exposed secrets are treated as maximally severe with a reachable code path,
+    because a leaked credential is exploitable the moment it is committed.
+    """
+    mapped: List[Dict[str, Any]] = []
+
+    for entry in report:
+        if not isinstance(entry, dict):
+            continue
+
+        rule_id = str(entry.get("RuleID") or "gitleaks:unknown-rule")
+        file_path = str(entry.get("File") or "unknown")
+        line = entry.get("StartLine")
+        location = f"{file_path}:{line}" if line else file_path
+
+        # Never carry the secret value itself forward. --redact blanks it, but
+        # a local run without --redact would otherwise copy live credentials
+        # into merged_findings.json and then into a CI artifact.
+        description = str(entry.get("Description") or rule_id)
+
+        mapped.append({
+            "id": rule_id,
+            "kind": "secret",
+            "title": description,
+            "severity": "CRITICAL",
+            "location": location,
+            "cvss": 0.0,
+            "epss": 0.0,
+            "kev": False,
+            "reachable": True,
+        })
+
+    return mapped
 
 
 def collect(scanner_dir: str = SCANNER_DIR) -> List[Dict[str, Any]]:

@@ -267,6 +267,34 @@ class TestPolicy(GateTestCase):
         result = policy_module.check_policy(correlate.correlate([secret]), relaxed)
         self.assertEqual(result["decision"], policy_module.ALLOW)
 
+    def test_secret_risk_score_is_low_and_rule_dependent(self):
+        """
+        Documents a deliberate limitation rather than asserting ideal behaviour.
+
+        The risk formula is calibrated for CVE-shaped findings. A secret has no
+        CVSS and no EPSS, so its score reflects reachability alone and comes out
+        at 10.0 - well under any sane max_risk_score. A committed credential is
+        therefore governed entirely by the block_secrets rule.
+
+        The practical consequence: setting block_secrets to false lets a leaked
+        credential through with a score of 10.0. That is why the rule defaults
+        to true, and why the README calls this out. If the weights are ever
+        revised to score secrets on their own merits, this test should be
+        updated to assert the new floor rather than simply deleted.
+        """
+        secret = {"id": "gitleaks-key", "kind": "secret", "reachable": True}
+        scored = correlate.correlate([secret])
+
+        self.assertEqual(scored[0]["risk_score"], 10.0)
+        self.assertLess(
+            scored[0]["risk_score"],
+            policy_module.DEFAULT_POLICY["max_risk_score"],
+        )
+
+        # With the rule on, it is blocked despite that low score.
+        blocked = policy_module.check_policy(scored, policy_module.load_policy(None))
+        self.assertEqual(blocked["decision"], policy_module.BLOCK)
+
     def test_kev_rule_can_be_disabled(self):
         """Score threshold still blocks a KEV finding; the rule itself is off."""
         relaxed = dict(policy_module.DEFAULT_POLICY)

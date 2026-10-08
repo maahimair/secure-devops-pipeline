@@ -38,6 +38,9 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
+          # The secret scanner walks git history, not just the working tree, so
+          # a shallow clone would silently hide every historical leak.
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38 # v5.4.0
@@ -67,47 +70,103 @@ jobs:
         run: python tests/run_tests.py -v
 
       # ── Scanner stage ──────────────────────────────────────────────────────
+      # The scanners are installed as pinned, SHA-256-verified release binaries
+      # rather than through third-party actions. Reasons, in order of weight:
+      #
+      #   * aquasecurity/trivy-action@<pinned> failed during JOB SETUP, before
+      #     any step executed, which aborted the whole pipeline.
+      #   * gitleaks/gitleaks-action ran but failed, because it needs full git
+      #     history that a default shallow checkout does not provide.
+      #   * semgrep/semgrep-action is archived (last pushed April 2024) and
+      #     requires a SEMGREP_APP_TOKEN this pipeline does not have.
+      #
+      # Verifying the download against a pinned digest also means the binary is
+      # pinned to a known hash, not merely to a version number that upstream can
+      # re-cut. The only remaining actions are first-party and SHA-pinned.
+      - name: Install scanners (pinned and checksum-verified)
+        run: |
+          set -euo pipefail
+          mkdir -p scanner-output /tmp/scanners
+
+          # ── Trivy v0.75.0 ────────────────────────────────────────────────
+          TRIVY_VER=0.75.0
+          TRIVY_SHA=c6e65abddb348e25f10549df887045629cf28cc72453cd1c63acb717316b3f3f
+          curl -fsSL --retry 3 -o /tmp/scanners/trivy.tar.gz \
+            "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VER}/trivy_${TRIVY_VER}_Linux-64bit.tar.gz"
+          echo "${TRIVY_SHA}  /tmp/scanners/trivy.tar.gz" | sha256sum --check --strict
+          tar -xzf /tmp/scanners/trivy.tar.gz -C /tmp/scanners trivy
+          install -m 0755 /tmp/scanners/trivy /usr/local/bin/trivy
+
+          # ── Gitleaks v8.30.1 ─────────────────────────────────────────────
+          GITLEAKS_VER=8.30.1
+          GITLEAKS_SHA=551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+          curl -fsSL --retry 3 -o /tmp/scanners/gitleaks.tar.gz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VER}/gitleaks_${GITLEAKS_VER}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA}  /tmp/scanners/gitleaks.tar.gz" | sha256sum --check --strict
+          tar -xzf /tmp/scanners/gitleaks.tar.gz -C /tmp/scanners gitleaks
+          install -m 0755 /tmp/scanners/gitleaks /usr/local/bin/gitleaks
+
+          # ── Semgrep from a pinned PyPI release ───────────────────────────
+          # The p/python ruleset needs no SEMGREP_APP_TOKEN.
+          pip install "semgrep==1.180.0"
+
+          trivy --version
+          gitleaks version
+          semgrep --version
+
       # Each scanner writes normalised JSON into scanner-output/. A scanner that
       # fails must fail the job rather than silently producing an empty file,
       # which would look like "no findings" and let a deployment through.
       - name: Secret scan — Gitleaks
-        uses: gitleaks/gitleaks-action@e6dab246340401bf53eec993b8f05aebe80ac636 # v2.3.4
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # gitleaks exits 1 when it finds a leak. That is expected: the
+          # findings are the input to the gate, not a reason to abandon the run.
+          gitleaks detect \
+            --source . \
+            --report-format json \
+            --report-path scanner-output/gitleaks.json \
+            --redact \
+            --no-banner \
+            --exit-code 0 || echo "gitleaks reported findings (expected)"
+          if [ ! -s scanner-output/gitleaks.json ]; then
+            echo "::error::Gitleaks produced no report; refusing to continue."
+            exit 1
+          fi
+          echo "gitleaks completed with a report present."
 
-      # Semgrep is installed from a pinned PyPI release rather than via
-      # semgrep/semgrep-action, which is archived (last pushed April 2024) and
-      # requires a SEMGREP_APP_TOKEN. An archived action pinned in a security
-      # pipeline is a liability: it receives no fixes and cannot be trusted to
-      # keep behaving. The p/python ruleset needs no token.
       - name: SAST — Semgrep
         run: |
           set -euo pipefail
-          pip install "semgrep==1.180.0"
-          mkdir -p scanner-output
-          # Semgrep exits non-zero when it finds issues, which is expected here:
-          # the findings are the point, and gate.py decides whether they block.
+          # Semgrep also exits non-zero on findings, which is expected here.
           semgrep scan \
             --config p/python \
             --json \
             --output scanner-output/semgrep.json \
             --metrics=off \
             --error \
-            . || SEMGREP_RC=$?
+            . || echo "semgrep reported findings (expected)"
           if [ ! -s scanner-output/semgrep.json ]; then
             echo "::error::Semgrep produced no report; refusing to continue."
             exit 1
           fi
-          echo "Semgrep completed (exit ${SEMGREP_RC:-0}) with a report present."
+          echo "semgrep completed with a report present."
 
       - name: SCA — Trivy
-        uses: aquasecurity/trivy-action@915b19bbe73b92a6cf82a1bc12b087c9a19a5fe2 # v0.28.0
-        with:
-          scan-type: fs
-          scan-ref: .
-          severity: CRITICAL,HIGH
-          format: json
-          output: scanner-output/trivy.json
+        run: |
+          set -euo pipefail
+          trivy fs \
+            --scanners vuln,secret \
+            --severity CRITICAL,HIGH \
+            --format json \
+            --output scanner-output/trivy.json \
+            --exit-code 0 \
+            .
+          if [ ! -s scanner-output/trivy.json ]; then
+            echo "::error::Trivy produced no report; refusing to continue."
+            exit 1
+          fi
+          echo "trivy completed with a report present."
 
       - name: Normalise scanner output
         run: |

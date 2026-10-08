@@ -323,6 +323,14 @@ choices and why they matter:
 
 * Risk weights are heuristic and are not calibrated against real organisational
   risk data.
+* **Secrets are governed entirely by `block_secrets`, not by the risk score.**
+  The formula is calibrated for CVE-shaped findings; a secret has no CVSS and no
+  EPSS, so its score reflects reachability alone and comes out at **10.0**,
+  below any sane `max_risk_score`. Setting `block_secrets: false` for
+  convenience therefore lets a committed credential through with a score of
+  10.0. This is asserted by
+  `TestPolicy::test_secret_risk_score_is_low_and_rule_dependent`, so the
+  behaviour stays visible rather than accidental.
 * EPSS and KEV values are supplied as input data; there is no live
   synchronisation with FIRST or CISA.
 * Reachability is a finding signal, not a computed call-graph analysis.
