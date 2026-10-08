@@ -1,0 +1,38 @@
+{
+  "_comment": "Baseline sample findings across all supported scanner kinds. Synthetic data used for validation only.",
+  "results": [
+    {
+      "id": "CVE-2023-44487",
+      "kind": "sca",
+      "title": "HTTP/2 rapid reset request smuggling",
+      "severity": "HIGH",
+      "location": "requirements.txt",
+      "cvss": 7.5,
+      "epss": 0.94,
+      "kev": true,
+      "reachable": true
+    },
+    {
+      "id": "CVE-2024-1234",
+      "kind": "sca",
+      "title": "Minor issue in a non-reachable helper module",
+      "severity": "MEDIUM",
+      "location": "src/helpers.py",
+      "cvss": 5.3,
+      "epss": 0.01,
+      "kev": false,
+      "reachable": false
+    },
+    {
+      "id": "CVE-2022-0001",
+      "kind": "sca",
+      "title": "Legacy library issue with no observed exploitation",
+      "severity": "LOW",
+      "location": "src/legacy.py",
+      "cvss": 3.1,
+      "epss": 0.001,
+      "kev": false,
+      "reachable": false
+    }
+  ]
+}

@@ -1,1 +1,14 @@
-requests==2.33.0
+# VerifierGate runtime dependencies.
+#
+# correlate.py, policy.py, provenance.py, ledger.py, gate.py and pipeline_sim.py
+# are implemented against the Python 3.9+ standard library only, so the gate can
+# run on a minimal or network-restricted build runner with nothing installed.
+#
+# There are therefore deliberately no required packages here.
+#
+# Optional, for development only:
+#   pytest        # the test suite also runs via tests/run_tests.py with no deps
+#
+# Note: the upstream project originally pinned `requests` here. VerifierGate
+# makes no outbound network calls, so the dependency was removed rather than
+# left as an unused attack surface.

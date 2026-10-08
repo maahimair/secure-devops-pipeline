@@ -1,0 +1,5 @@
+{
+  "max_risk_score": 40,
+  "block_known_exploited": true,
+  "block_secrets": true
+}
