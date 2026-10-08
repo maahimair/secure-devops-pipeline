@@ -1,0 +1,30 @@
+# Normalise line endings in the repository, and check them out per platform.
+#
+# Without this, a Windows checkout rewrites LF to CRLF on every file, which
+# produces noisy diffs and lets a commit change line endings without changing
+# content.
+
+* text=auto eol=lf
+
+# Shell scripts must stay LF even on Windows, or they fail to execute.
+*.sh text eol=lf
+
+# Windows-native scripts.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Binary assets must never be line-ending translated.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.zip binary
+*.gz binary
+*.tar binary
+*.pkl binary
+*.joblib binary
+*.npy binary
+*.mat binary
